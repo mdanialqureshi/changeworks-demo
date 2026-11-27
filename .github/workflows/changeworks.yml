@@ -87,7 +87,7 @@ defaults:
     shell: bash
 
 env:
-  CHANGEWORKS_PACKAGE: "changeworks @ git+https://github.com/mdanialqureshi/changeworks@bdc6ee04d9420fc5257a113c0e29ad81b6479fe6"
+  CHANGEWORKS_PACKAGE: "changeworks @ git+https://github.com/mdanialqureshi/changeworks@02c8b94eabb300534e985a120f3cbdf1ec6111b8"
   CLAUDE_CODE_VERSION: "2.1.326"
   UV_VERSION: "0.13.9"
   PYTHON_VERSION: "3.14"
@@ -633,7 +633,10 @@ jobs:
       - name: Assume the callback role (exact-sub OIDC trust)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: ${{ vars.CHANGEWORKS_CALLBACK_ROLE_ARN }}
+          # A secret, not a variable: the ARN holds the account ID, and
+          # GitHub masks secrets in the (public) log, never variables.
+          role-to-assume: ${{ secrets.CHANGEWORKS_CALLBACK_ROLE_ARN }}
+          mask-aws-account-id: true
           aws-region: us-east-1
           role-session-name: changeworks-report
           role-duration-seconds: 900
