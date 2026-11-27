@@ -1,61 +1,78 @@
-# Changeworks policy for this repository (read from the default branch).
-# Budgets are per task class and sit inside DESIGN §2.6's caps: turns
-# <= 40, minutes <= 30, usd <= 0.25 (api route only), ci_rounds <= 2.
+# Changeworks policy for this repository (DESIGN §3).
+# Install at the repo root. The factory reads it from the default branch
+# only; it is a protected, code-owned path, so a patch can never change
+# it. Validated by changeworks.jobs.FactoryConfig: unknown keys are
+# errors, and budgets may not exceed the course caps ($0.25, 40 turns,
+# 30 minutes per run, 2 CI rounds).
+version = 1
 
-[factory]
+# Extra globs a patch may not touch, on top of the protected paths and
+# verify's denylist (both fixed in code). Example: ["migrations/**"].
+must_not_touch = []
+
+[repo]
+# The map an agent reads first: at most 100 lines, naming the code, the
+# tests and the check script (readiness signs 1-5).
+map = "AGENTS.md"
 check_script = "scripts/check.sh"
-# Added to the factory's built-in protected paths (DESIGN §2.4).
-protected_paths = []
+# What verify runs, offline, inside docker --network none.
+check_command = ["bash", "scripts/check.sh"]
+code_dirs = ["src/"]
+tests_dir = "tests/"
+lockfile = "uv.lock"
 
-[triage]
-# Words that set a floor under the triage model's risk.
-medium = ["rounding", "tax", "payment", "credit note", "numbering"]
-high = ["private key", "production database"]
-
+# Per-class budgets. `usd` applies to the api route only; plan-route
+# runs count against the run budget instead (DESIGN §2.6 row 5).
 [budgets.bug]
+files = 5
+lines = 200
+turns = 40
+tokens = 1500000
+minutes = 30
+usd = 0.25
+ci_rounds = 2
+
+[budgets.test]
 files = 4
-lines = 150
+lines = 300
 turns = 30
+tokens = 1000000
 minutes = 20
 usd = 0.15
 ci_rounds = 2
 
-[budgets.test]
-files = 3
-lines = 250
-turns = 25
+[budgets.docs]
+files = 5
+lines = 300
+turns = 20
+tokens = 600000
 minutes = 15
 usd = 0.10
 ci_rounds = 2
 
-[budgets.docs]
-files = 3
-lines = 150
-turns = 15
-minutes = 10
-usd = 0.05
-ci_rounds = 1
-
 [budgets.lint-types]
-files = 4
-lines = 120
-turns = 20
-minutes = 15
-usd = 0.08
+files = 10
+lines = 200
+turns = 30
+tokens = 800000
+minutes = 20
+usd = 0.15
 ci_rounds = 2
 
 [budgets.deps-fix]
 files = 3
-lines = 80
+lines = 100
 turns = 30
+tokens = 1000000
 minutes = 20
 usd = 0.15
 ci_rounds = 2
 
 [budgets.small-feature]
 files = 5
-lines = 300
+lines = 400
 turns = 40
+tokens = 1500000
 minutes = 30
 usd = 0.25
 ci_rounds = 2
