@@ -87,7 +87,7 @@ defaults:
     shell: bash
 
 env:
-  CHANGEWORKS_PACKAGE: "changeworks @ git+https://github.com/mdanialqureshi/changeworks@02c8b94eabb300534e985a120f3cbdf1ec6111b8"
+  CHANGEWORKS_PACKAGE: "changeworks @ git+https://github.com/mdanialqureshi/changeworks@fd452577ec98642b0e7845d4b62f8be5a8eb136a"
   CLAUDE_CODE_VERSION: "2.1.326"
   UV_VERSION: "0.13.9"
   PYTHON_VERSION: "3.14"
