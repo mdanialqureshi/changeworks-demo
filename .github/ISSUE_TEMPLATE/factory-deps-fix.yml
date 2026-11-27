@@ -1,0 +1,19 @@
+name: Dependency fix
+description: A bot's dependency bump fails CI; fix the code, keep the bump.
+title: "deps: "
+body:
+  - type: input
+    id: pr
+    attributes:
+      label: Bump PR
+      description: The bot's pull request (number or link) and its branch.
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: CI failure
+      description: The failing check's output.
+      render: text
+    validations:
+      required: true

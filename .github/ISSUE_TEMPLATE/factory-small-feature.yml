@@ -1,0 +1,18 @@
+name: Small feature
+description: A small, testable feature (five files or fewer).
+title: "feature: "
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What and why
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance commands
+      description: Commands and the output that shows the feature works.
+      render: sh
+    validations:
+      required: true

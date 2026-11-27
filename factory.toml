@@ -1,0 +1,61 @@
+# Changeworks policy for this repository (read from the default branch).
+# Budgets are per task class and sit inside DESIGN §2.6's caps: turns
+# <= 40, minutes <= 30, usd <= 0.25 (api route only), ci_rounds <= 2.
+
+[factory]
+check_script = "scripts/check.sh"
+# Added to the factory's built-in protected paths (DESIGN §2.4).
+protected_paths = []
+
+[triage]
+# Words that set a floor under the triage model's risk.
+medium = ["rounding", "tax", "payment", "credit note", "numbering"]
+high = ["private key", "production database"]
+
+[budgets.bug]
+files = 4
+lines = 150
+turns = 30
+minutes = 20
+usd = 0.15
+ci_rounds = 2
+
+[budgets.test]
+files = 3
+lines = 250
+turns = 25
+minutes = 15
+usd = 0.10
+ci_rounds = 2
+
+[budgets.docs]
+files = 3
+lines = 150
+turns = 15
+minutes = 10
+usd = 0.05
+ci_rounds = 1
+
+[budgets.lint-types]
+files = 4
+lines = 120
+turns = 20
+minutes = 15
+usd = 0.08
+ci_rounds = 2
+
+[budgets.deps-fix]
+files = 3
+lines = 80
+turns = 30
+minutes = 20
+usd = 0.15
+ci_rounds = 2
+
+[budgets.small-feature]
+files = 5
+lines = 300
+turns = 40
+minutes = 30
+usd = 0.25
+ci_rounds = 2

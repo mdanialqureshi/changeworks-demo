@@ -1,0 +1,17 @@
+name: Docs
+description: Fix or extend documentation (docs/ or Markdown files).
+title: "docs: "
+body:
+  - type: textarea
+    id: files
+    attributes:
+      label: Files
+      description: The documentation files to change.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What is wrong or missing
+    validations:
+      required: true

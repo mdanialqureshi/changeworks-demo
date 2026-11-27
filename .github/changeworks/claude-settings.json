@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "disableAllHooks": true,
+  "permissions": {
+    "blockWritesOutsideWorkingDirectories": true,
+    "deny": [
+      "WebFetch",
+      "WebSearch",
+      "mcp__*",
+      "Edit(./.github/**)",
+      "Edit(./.claude/**)",
+      "Edit(./.mcp.json)",
+      "Edit(./CLAUDE.md)",
+      "Edit(./CLAUDE.local.md)",
+      "Edit(./factory.toml)",
+      "Edit(./uv.lock)",
+      "Edit(./.git/**)",
+      "Read(~/.claude/**)",
+      "Read(~/.claude.json)",
+      "Read(~/.aws/**)",
+      "Read(~/.ssh/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": ["pypi.org", "files.pythonhosted.org"]
+    },
+    "credentials": {
+      "files": [
+        { "path": "~/.claude", "mode": "deny" },
+        { "path": "~/.claude.json", "mode": "deny" },
+        { "path": "~/.aws", "mode": "deny" },
+        { "path": "~/.ssh", "mode": "deny" }
+      ],
+      "envVars": [
+        { "name": "CLAUDE_CODE_OAUTH_TOKEN", "mode": "deny" },
+        { "name": "ANTHROPIC_API_KEY", "mode": "deny" },
+        { "name": "ANTHROPIC_AUTH_TOKEN", "mode": "deny" },
+        { "name": "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "mode": "deny" },
+        { "name": "ACTIONS_ID_TOKEN_REQUEST_URL", "mode": "deny" },
+        { "name": "ACTIONS_RUNTIME_TOKEN", "mode": "deny" },
+        { "name": "GITHUB_TOKEN", "mode": "deny" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+name: Lint or types
+description: Fix the findings of one named ruff rule (or rule group).
+title: "lint: "
+body:
+  - type: input
+    id: rule
+    attributes:
+      label: Rule
+      description: For example `B006` or `UP006,UP035`.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Checker command
+      description: The exact command whose findings must go to zero.
+      render: sh
+    validations:
+      required: true

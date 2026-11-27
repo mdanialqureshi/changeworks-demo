@@ -1,0 +1,660 @@
+# Changeworks: the factory's hands (DESIGN §2.1, §2.2 steps 5-8, §2.4).
+# Install as .github/workflows/changeworks.yml on the default branch; it
+# is a protected, code-owned path. templates/README.md says what to fill.
+#
+# Three runs, all dispatched by the factory (workflow_dispatch only):
+#   implement run: prepare -> implement -> report
+#   verify run:    verify -> review -> report
+#   think run:     think -> report   (a model stage: triage or the spec
+#                  draft; tool-less, checkout-free, prompt and schema in)
+# Only `report` may mint an OIDC token. Only the `claude` steps see the
+# plan token, and only through their own env. Lint before every change:
+#   python -m changeworks.workflow_lint .github/workflows/changeworks.yml
+#
+# Scripted mode (DESIGN §2.8, `changeworks cloud-check`): when the repo
+# variable CHANGEWORKS_ENGINE is `scripted`, every step that installs or
+# runs Claude Code is skipped by its `if:` (so the token step never runs
+# and the secret is never put into an environment) and the factory's own
+# pinned job code replays its recorded cloud-check answers instead
+# (`python -m changeworks.jobs.scripted`, $0). Any other value, or none,
+# runs Claude Code as before. GitHub compares strings case-insensitively,
+# so `Scripted` also selects scripted mode.
+#
+# Checked against official pages on 25 Nov 2026:
+# - code.claude.com/docs/en/cli-reference: --setting-sources,
+#   --strict-mcp-config, --settings (merges, files <=2 MiB),
+#   --permission-mode dontAsk, --allowedTools, --tools "" (no built-in
+#   tools), --disallowedTools, --max-turns, --model, --json-schema,
+#   --output-format json.
+# - code.claude.com/docs/en/settings-reference and /sandboxing:
+#   disableAllHooks; sandbox.enabled, failIfUnavailable,
+#   allowUnsandboxedCommands=false (else an allow rule approves an
+#   unsandboxed retry), network.allowedDomains, credentials;
+#   permissions.blockWritesOutsideWorkingDirectories (>= 2.1.314);
+#   bubblewrap + socat and the AppArmor profile for /usr/bin/bwrap on
+#   Ubuntu; dontAsk refuses hosts outside the allowlist; the sandbox
+#   covers shell commands only and does not limit WebFetch.
+# - code.claude.com/docs/en/env-vars: CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
+#   strips credentials from subprocesses (it leaves GitHub tokens, so no
+#   GitHub token exists in implement); ANTHROPIC_API_KEY always wins in
+#   -p; CLAUDE_CODE_OAUTH_TOKEN comes from `claude setup-token`.
+# - code.claude.com/docs/en/model-config: claude-haiku-5-5.
+# - docs.github.com/en/actions/reference/workflows-and-actions/
+#   workflow-syntax: permissions {} disables all; dispatch inputs (<=25,
+#   <=65,535 chars); concurrency groups.
+# - docs.github.com/en/actions/reference/security/oidc: id-token: write
+#   per job; sub formats incl. owner/repo IDs for repos from 15 Jul 2026.
+# - docs.github.com/en/actions/reference/security/secure-use: pin to
+#   full commit SHAs; pass expressions through env, not into scripts.
+# - docs.aws.amazon.com/step-functions/latest/apireference/
+#   API_SendTaskSuccess.html: output <=262,144 bytes, token <=2048.
+# Action SHAs: resolved from each repo's release tag with the GitHub API
+# on 25 Nov 2026; each is the newest release at least 14 days old. The
+# image digest is Docker Hub's ubuntu:24.04 index on the same day.
+
+name: changeworks
+run-name: changeworks ${{ inputs.stage }} ${{ inputs.item }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: implement, verify or think
+        type: choice
+        options: [implement, verify, think]
+        required: true
+      item:
+        description: work item, W-<repoId>-<issue>-<n>
+        type: string
+        required: true
+      task_token:
+        description: Step Functions task token (the waiting state's ref)
+        type: string
+        required: true
+      nonce:
+        description: single-use nonce for the fetch function
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: changeworks-${{ github.repository_id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CHANGEWORKS_PACKAGE: "changeworks @ git+https://github.com/mdanialqureshi/changeworks@bdc6ee04d9420fc5257a113c0e29ad81b6479fe6"
+  CLAUDE_CODE_VERSION: "2.1.326"
+  UV_VERSION: "0.13.9"
+  PYTHON_VERSION: "3.14"
+  CHECK_IMAGE: "ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b"
+  MODEL: claude-haiku-5-5
+
+jobs:
+  # ---------------------------------------------------------- implement run
+  prepare:
+    if: inputs.stage == 'implement'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.base.outputs.base_sha }}
+    steps:
+      - name: Refuse anything but the default branch
+        env:
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::changeworks runs only from the default branch"
+            exit 1
+          fi
+
+      - name: Check out the base commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Pack the base tree for implement (no token in it)
+        id: base
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          tar -C "$GITHUB_WORKSPACE" -cf "$RUNNER_TEMP/base/base.tar" .
+          echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install the factory's job code (pinned commit)
+        run: |
+          uv venv --quiet --python "$PYTHON_VERSION" "$RUNNER_TEMP/cw"
+          uv pip install --quiet --python "$RUNNER_TEMP/cw/bin/python" \
+            "$CHANGEWORKS_PACKAGE"
+
+      - name: Fetch the approved spec once (single-use nonce)
+        env:
+          FETCH_URL: ${{ vars.CHANGEWORKS_FETCH_URL }}
+          ITEM: ${{ inputs.item }}
+          NONCE: ${{ inputs.nonce }}
+        run: |
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.prepare fetch \
+            --out "$RUNNER_TEMP/inputs"
+
+      - name: uv sync --frozen (base tree, no secrets)
+        run: uv sync --frozen
+
+      - name: Readiness signs 1-8 (runtime signs come from the factory)
+        run: |
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.prepare \
+            readiness --repo . \
+            --signs "$RUNNER_TEMP/inputs/runtime-signs.json" \
+            --out "$RUNNER_TEMP/inputs/readiness.json"
+
+      - name: Upload the base tree
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cw-base
+          path: ${{ runner.temp }}/base/base.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload the spec, prompt and readiness
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cw-report-inputs
+          path: ${{ runner.temp }}/inputs/
+          if-no-files-found: error
+          retention-days: 1
+
+  implement:
+    needs: prepare
+    if: inputs.stage == 'implement'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    # No GitHub token scopes, no id-token. The repo arrives as prepare's
+    # tarball, so this job needs no checkout and holds no Git credential.
+    permissions: {}
+    steps:
+      - name: Download the base tree
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cw-base
+          path: ${{ runner.temp }}/base
+
+      - name: Download the spec and prompt
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cw-report-inputs
+          path: ${{ runner.temp }}/inputs
+
+      - name: Restore the base tree and keep a pristine .git
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+        run: |
+          tar -C "$GITHUB_WORKSPACE" -xf "$RUNNER_TEMP/base/base.tar"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          cp -a .git "$RUNNER_TEMP/pristine.git"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install the factory's job code (scripted mode only)
+        if: vars.CHANGEWORKS_ENGINE == 'scripted'
+        run: |
+          uv venv --quiet --python "$PYTHON_VERSION" "$RUNNER_TEMP/cw"
+          uv pip install --quiet --python "$RUNNER_TEMP/cw/bin/python" \
+            "$CHANGEWORKS_PACKAGE"
+
+      - name: uv sync --frozen (before any credential exists)
+        run: uv sync --frozen
+
+      - name: Install the sandbox's dependencies and Claude Code (pinned)
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap socat
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' \
+            '  userns,' '  include if exists <local/bwrap>' '}' \
+            | sudo tee /etc/apparmor.d/bwrap > /dev/null
+          sudo systemctl reload apparmor
+          npm install --global --no-fund --no-audit \
+            "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+
+      # In -p mode a settings file that fails to load is skipped, not
+      # fatal: so refuse to start unless it parses and holds the lock-down.
+      - name: Check the settings file before the token exists
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        run: |
+          python3 - .github/changeworks/claude-settings.json <<'PY'
+          import json, sys
+          s = json.load(open(sys.argv[1]))
+          box = s.get("sandbox", {})
+          assert s.get("disableAllHooks") is True, "disableAllHooks"
+          assert box.get("enabled") is True, "sandbox.enabled"
+          assert box.get("failIfUnavailable") is True, "failIfUnavailable"
+          assert box.get("allowUnsandboxedCommands") is False, "unsandboxed"
+          assert isinstance(box.get("network", {}).get("allowedDomains"),
+                            list), "allowedDomains"
+          print("settings: lock-down present")
+          PY
+
+      - name: Implement the spec (the only step with the plan token)
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+          DISABLE_AUTOUPDATER: "1"
+          MAX_TURNS: "40"
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          claude -p \
+            --setting-sources user \
+            --strict-mcp-config \
+            --settings .github/changeworks/claude-settings.json \
+            --permission-mode dontAsk \
+            --tools "Read,Edit,Write,Glob,Grep,Bash" \
+            --allowedTools "Read" "Edit" "Write" "Glob" "Grep" \
+              "Bash(uv run pytest *)" "Bash(uv run ruff check *)" \
+              "Bash(uv run ruff format *)" \
+            --disallowedTools "WebFetch" "WebSearch" "mcp__*" \
+            --max-turns "$MAX_TURNS" \
+            --model "$MODEL" \
+            --output-format json \
+            < "$RUNNER_TEMP/inputs/prompt.md" \
+            > "$RUNNER_TEMP/out/claude.json"
+
+      # Scripted mode: the recorded fixture patch, applied by the scripted
+      # engine from the factory's pinned code. No credential exists here.
+      - name: Implement from the recorded fixture (scripted engine, $0)
+        if: vars.CHANGEWORKS_ENGINE == 'scripted'
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.scripted \
+            implement --inputs "$RUNNER_TEMP/inputs" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/out/claude.json"
+
+      - name: Make the patch with the pristine .git and factory config
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+        run: |
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_DIR="$RUNNER_TEMP/pristine.git"
+          export GIT_WORK_TREE="$GITHUB_WORKSPACE"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/patch.index"
+          safe=(-c core.hooksPath=/dev/null -c core.fsmonitor=false)
+          git "${safe[@]}" read-tree "$BASE_SHA"
+          git "${safe[@]}" add --all -- .
+          git "${safe[@]}" diff --cached --binary --full-index \
+            --no-ext-diff --no-textconv --no-color "$BASE_SHA" \
+            > "$RUNNER_TEMP/out/changes.patch"
+          echo "patch bytes: $(wc -c < "$RUNNER_TEMP/out/changes.patch")"
+
+      - name: Upload the patch and Claude Code's result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cw-report-implement
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: warn
+          retention-days: 1
+
+  # ------------------------------------------------------------- verify run
+  verify:
+    if: inputs.stage == 'verify'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # No secrets, no id-token. Patch code only ever runs in docker with
+    # --network none; the checkout keeps no credential.
+    permissions:
+      contents: read
+    outputs:
+      decision: ${{ steps.run.outputs.decision || steps.policy.outputs.decision }}
+    steps:
+      - name: Refuse anything but the default branch
+        env:
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::changeworks runs only from the default branch"
+            exit 1
+          fi
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install the factory's job code (pinned commit)
+        run: |
+          uv venv --quiet --python "$PYTHON_VERSION" "$RUNNER_TEMP/cw"
+          uv pip install --quiet --python "$RUNNER_TEMP/cw/bin/python" \
+            "$CHANGEWORKS_PACKAGE"
+
+      - name: Fetch patch and holdouts once (single-use nonce)
+        id: fetch
+        env:
+          FETCH_URL: ${{ vars.CHANGEWORKS_FETCH_URL }}
+          ITEM: ${{ inputs.item }}
+          NONCE: ${{ inputs.nonce }}
+        run: |
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.verify fetch \
+            --out "$RUNNER_TEMP/verify"
+
+      - name: Check out the base commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.fetch.outputs.base_sha }}
+          persist-credentials: false
+
+      - name: Diff policy and tree hash (before any code runs)
+        id: policy
+        run: |
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.verify policy \
+            --repo . --dir "$RUNNER_TEMP/verify"
+
+      - name: uv sync --frozen on the base tree (network; no patch yet)
+        if: steps.policy.outputs.decision == 'check'
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/cw-tools/venv
+          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/cw-tools/python
+          UV_PYTHON_PREFERENCE: only-managed
+        run: uv sync --frozen
+
+      - name: Checks, repro and holdouts offline in docker
+        id: run
+        if: steps.policy.outputs.decision == 'check'
+        run: |
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.verify run \
+            --repo . --dir "$RUNNER_TEMP/verify" \
+            --tools "$RUNNER_TEMP/cw-tools" --image "$CHECK_IMAGE"
+
+      - name: Upload the evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cw-report-verify
+          path: ${{ runner.temp }}/verify/report/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload the review input
+        if: steps.run.outputs.decision == 'pass'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cw-review-input
+          path: ${{ runner.temp }}/verify/review-input/
+          if-no-files-found: error
+          retention-days: 1
+
+  review:
+    needs: verify
+    if: needs.verify.outputs.decision == 'pass'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # Tool-less and checkout-free: diff and spec in, a typed record out.
+    permissions: {}
+    steps:
+      - name: Download the review input
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cw-review-input
+          path: ${{ runner.temp }}/review
+
+      - name: Set up uv (scripted mode only)
+        if: vars.CHANGEWORKS_ENGINE == 'scripted'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install the factory's job code (scripted mode only)
+        if: vars.CHANGEWORKS_ENGINE == 'scripted'
+        run: |
+          uv venv --quiet --python "$PYTHON_VERSION" "$RUNNER_TEMP/cw"
+          uv pip install --quiet --python "$RUNNER_TEMP/cw/bin/python" \
+            "$CHANGEWORKS_PACKAGE"
+
+      - name: Install the sandbox's dependencies and Claude Code (pinned)
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap socat
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' \
+            '  userns,' '  include if exists <local/bwrap>' '}' \
+            | sudo tee /etc/apparmor.d/bwrap > /dev/null
+          sudo systemctl reload apparmor
+          npm install --global --no-fund --no-audit \
+            "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+
+      - name: Review the diff against the spec (the only step with the token)
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+          DISABLE_AUTOUPDATER: "1"
+          MAX_TURNS: "4"
+        run: |
+          mkdir -p "$RUNNER_TEMP/review-out"
+          schema="$(cat "$RUNNER_TEMP/review/schema.json")"
+          claude -p \
+            --setting-sources user \
+            --strict-mcp-config \
+            --settings '{"disableAllHooks": true, "sandbox": {"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "network": {"allowedDomains": []}}}' \
+            --permission-mode dontAsk \
+            --tools "" \
+            --json-schema "$schema" \
+            --max-turns "$MAX_TURNS" \
+            --model "$MODEL" \
+            --output-format json \
+            < "$RUNNER_TEMP/review/prompt.md" \
+            > "$RUNNER_TEMP/review-out/review.json"
+
+      - name: Review from the recorded fixture (scripted engine, $0)
+        if: vars.CHANGEWORKS_ENGINE == 'scripted'
+        run: |
+          mkdir -p "$RUNNER_TEMP/review-out"
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.scripted \
+            review --dir "$RUNNER_TEMP/review" \
+            --out "$RUNNER_TEMP/review-out/review.json"
+
+      - name: Upload the review
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cw-report-review
+          path: ${{ runner.temp }}/review-out/
+          if-no-files-found: warn
+          retention-days: 1
+
+  # -------------------------------------------------------------- think run
+  think:
+    if: inputs.stage == 'think'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # A model stage (triage, the spec draft): tool-less and checkout-free.
+    # A prompt (untrusted text fenced inside it) and a schema in, a typed
+    # record out. No GitHub token scopes, no id-token, no checkout.
+    permissions: {}
+    env:
+      CLAUDE_SETTINGS: '{"disableAllHooks": true, "sandbox": {"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "network": {"allowedDomains": []}}}'
+    steps:
+      - name: Refuse anything but the default branch
+        env:
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error::changeworks runs only from the default branch"
+            exit 1
+          fi
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install the factory's job code (pinned commit)
+        run: |
+          uv venv --quiet --python "$PYTHON_VERSION" "$RUNNER_TEMP/cw"
+          uv pip install --quiet --python "$RUNNER_TEMP/cw/bin/python" \
+            "$CHANGEWORKS_PACKAGE"
+
+      - name: Fetch the prompt and schema once (single-use nonce)
+        env:
+          FETCH_URL: ${{ vars.CHANGEWORKS_FETCH_URL }}
+          ITEM: ${{ inputs.item }}
+          NONCE: ${{ inputs.nonce }}
+        run: |
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.think fetch \
+            --out "$RUNNER_TEMP/think"
+
+      - name: Install the sandbox's dependencies and Claude Code (pinned)
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap socat
+          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
+            'profile bwrap /usr/bin/bwrap flags=(unconfined) {' \
+            '  userns,' '  include if exists <local/bwrap>' '}' \
+            | sudo tee /etc/apparmor.d/bwrap > /dev/null
+          sudo systemctl reload apparmor
+          npm install --global --no-fund --no-audit \
+            "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+
+      # As in implement: refuse to start unless the settings parse and hold
+      # the lock-down, before the token exists.
+      - name: Check the settings before the token exists
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        run: |
+          python3 - <<'PY'
+          import json, os
+          s = json.loads(os.environ["CLAUDE_SETTINGS"])
+          box = s.get("sandbox", {})
+          assert s.get("disableAllHooks") is True, "disableAllHooks"
+          assert box.get("enabled") is True, "sandbox.enabled"
+          assert box.get("failIfUnavailable") is True, "failIfUnavailable"
+          assert box.get("allowUnsandboxedCommands") is False, "unsandboxed"
+          assert box.get("network", {}).get("allowedDomains") == [], "domains"
+          print("settings: lock-down present")
+          PY
+
+      - name: Think (the only step with the plan token; no tools)
+        if: vars.CHANGEWORKS_ENGINE != 'scripted'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+          DISABLE_AUTOUPDATER: "1"
+          MAX_TURNS: "4"
+        run: |
+          mkdir -p "$RUNNER_TEMP/think-out"
+          schema="$(cat "$RUNNER_TEMP/think/schema.json")"
+          claude -p \
+            --setting-sources user \
+            --strict-mcp-config \
+            --settings "$CLAUDE_SETTINGS" \
+            --permission-mode dontAsk \
+            --tools "" \
+            --allowedTools "" \
+            --disallowedTools "WebFetch" "WebSearch" "mcp__*" \
+            --json-schema "$schema" \
+            --max-turns "$MAX_TURNS" \
+            --model "$MODEL" \
+            --output-format json \
+            < "$RUNNER_TEMP/think/prompt.md" \
+            > "$RUNNER_TEMP/think-out/think.json"
+
+      - name: Think from the recorded fixture (scripted engine, $0)
+        if: vars.CHANGEWORKS_ENGINE == 'scripted'
+        run: |
+          mkdir -p "$RUNNER_TEMP/think-out"
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.scripted \
+            think --dir "$RUNNER_TEMP/think" \
+            --out "$RUNNER_TEMP/think-out/think.json"
+
+      - name: Upload the raw output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cw-report-think
+          path: ${{ runner.temp }}/think-out/
+          if-no-files-found: warn
+          retention-days: 1
+
+  # ----------------------------------------------------------- every run
+  report:
+    needs: [prepare, implement, verify, review, think]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The only job that can mint an OIDC token. No model credential, no
+    # checkout; it reads artifacts as data and calls back.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install the factory's job code (pinned commit)
+        run: |
+          uv venv --quiet --python "$PYTHON_VERSION" "$RUNNER_TEMP/cw"
+          uv pip install --quiet --python "$RUNNER_TEMP/cw/bin/python" \
+            "$CHANGEWORKS_PACKAGE"
+
+      - name: Download this run's results
+        # A failed stage may have uploaded nothing; report still has to
+        # tell the state machine so.
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cw-report-*
+          path: ${{ runner.temp }}/report
+
+      - name: Assume the callback role (exact-sub OIDC trust)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.CHANGEWORKS_CALLBACK_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: changeworks-report
+          role-duration-seconds: 900
+          role-skip-session-tagging: true
+
+      - name: Check the result and call Step Functions
+        env:
+          TASK_TOKEN: ${{ inputs.task_token }}
+          STAGE: ${{ inputs.stage }}
+          ITEM: ${{ inputs.item }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          IMPLEMENT_RESULT: ${{ needs.implement.result }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          THINK_RESULT: ${{ needs.think.result }}
+          # The engine the model steps ran, by the same test as their
+          # `if:`s; report checks it against the stage's own result.
+          ENGINE: ${{ vars.CHANGEWORKS_ENGINE == 'scripted' && 'scripted' || 'claude-code' }}
+        run: |
+          "$RUNNER_TEMP/cw/bin/python" -m changeworks.jobs.report \
+            --dir "$RUNNER_TEMP/report"

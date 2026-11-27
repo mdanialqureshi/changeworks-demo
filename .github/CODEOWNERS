@@ -1,0 +1,31 @@
+# Changeworks CODEOWNERS (DESIGN §2.3 "GitHub enforcement", §2.4).
+# Install as .github/CODEOWNERS and replace mdanialqureshi with your
+# GitHub login. It lists only the protected paths, so the ruleset's
+# "require review from Code Owners" blocks factory merges that touch
+# them and nothing else. Keep it in step with
+# changeworks.contract.PROTECTED_PATHS.
+
+# Workflows, issue forms, this file and the Claude settings file
+.github/                @mdanialqureshi
+
+# Claude Code configuration the agent must never change
+.claude/                @mdanialqureshi
+.mcp.json               @mdanialqureshi
+CLAUDE.md               @mdanialqureshi
+CLAUDE.local.md         @mdanialqureshi
+
+# The factory's policy for this repo, and ownership itself
+factory.toml            @mdanialqureshi
+CODEOWNERS              @mdanialqureshi
+
+# Lockfiles
+*.lock                  @mdanialqureshi
+package-lock.json       @mdanialqureshi
+npm-shrinkwrap.json     @mdanialqureshi
+pnpm-lock.yaml          @mdanialqureshi
+bun.lockb               @mdanialqureshi
+go.sum                  @mdanialqureshi
+
+# Infrastructure
+/infra/                 @mdanialqureshi
+/cdk.json               @mdanialqureshi

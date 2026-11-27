@@ -1,0 +1,34 @@
+name: Bug
+description: Something behaves differently from the docs or docstrings.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A maintainer adds `factory:candidate` if this should go to the
+        factory. The factory needs a repro and expected vs actual.
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Python or `quill` commands that show the problem.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Version, region, anything else useful.
